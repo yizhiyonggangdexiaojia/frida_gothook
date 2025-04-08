@@ -1,9 +1,11 @@
 function parseSoInfo(soinfo_addr) {
     return {
+        soinfo_addr: soinfo_addr,
         phdr: soinfo_addr.add(0).readPointer(),
         base: soinfo_addr.add(16).readPointer(),
         size: soinfo_addr.add(24).readULong(),
         dynamic: soinfo_addr.add(32).readPointer(),
+        _next: soinfo_addr.add(40),
         strtab: soinfo_addr.add(56).readPointer(),
         symtab: soinfo_addr.add(64).readPointer(),
         plt_rela: soinfo_addr.add(104).readPointer(),
@@ -23,7 +25,7 @@ function parseSoInfo(soinfo_addr) {
         load_bias: soinfo_addr.add(248).readPointer(),
 
         next: function () {
-            return parseSoInfo(soinfo_addr.add(40).readPointer())
+            return parseSoInfo(this._next.readPointer())
         },
 
         // 一般都是空的
@@ -129,6 +131,7 @@ function getSoInfo(so_name) {
         let realPath;
         realPath = soInfo.getSoname()
         if (realPath && realPath.indexOf(so_name) !== -1) {
+            console.log(realPath)
             return soInfo
         }
         try {
@@ -142,6 +145,9 @@ function getSoInfo(so_name) {
 
 function getPltAddr(so_name, funcName) {
     const soInfo = getSoInfo(so_name)
+    if (!soInfo) {
+        throw new Error("not find soinfo " + so_name)
+    }
     // // so地址
     // console.log(soInfo.getRealpath());
     //
@@ -172,7 +178,7 @@ function getPltAddr(so_name, funcName) {
         // console.log("elf64Sym偏移: " + _elf64SymAddr.sub(soInfo.base))
         const _elf64Sym = parseElf64_Sym(_elf64SymAddr);
         const _funcName = soInfo.strtab.add(_elf64Sym.st_name).readUtf8String()
-        if (_funcName === funcName) {
+        if (_funcName.indexOf(funcName) !== -1) {
             elf64Rela = _elf64Rela
             break
         }
@@ -184,7 +190,7 @@ function getPltAddr(so_name, funcName) {
     return soInfo.base.add(elf64Rela.r_offset)
 }
 
-function GotHook(so_name, funcName, newFuncAddr){
+function GotHook(so_name, funcName, newFuncAddr) {
     let gotAddress = getPltAddr(so_name, funcName)
     console.log("gotAddress:", gotAddress)
     // 函数替换
@@ -193,6 +199,39 @@ function GotHook(so_name, funcName, newFuncAddr){
     console.log("gotAddress hook after", gotAddress.readPointer())
     Memory.protect(gotAddress, 8, "r--")
 }
+
+function soListRemove(so_name) {
+    let soInfo = parseSoInfo(getSoInfoHead())
+    while (true) {
+        let realPath;
+        let _soInfo;
+        try {
+            _soInfo = soInfo.next()
+        } catch (e) {
+            break
+        }
+        realPath = _soInfo.getSoname()
+        if (realPath && realPath.indexOf(so_name) !== -1) {
+            let __soInfo
+            try {
+                __soInfo = _soInfo.next()
+            } catch (e) {
+                __soInfo = {
+                    soinfo_addr: ptr(0)
+                }
+            }
+            Memory.protect(soInfo._next, 8, "rw-")
+            soInfo._next.writePointer(__soInfo.soinfo_addr)
+            Memory.protect(soInfo._next, 8, "r--")
+            console.log("soList remove " + so_name)
+            break
+        }
+        soInfo = _soInfo
+    }
+}
+
+// 删除注入的so
+soListRemove("libhhh.so")
 
 function create_pthread_create() {
     const pthread_create_addr = Module.findExportByName(null, "pthread_create")
@@ -207,5 +246,27 @@ function create_pthread_create() {
     }, "int", ["pointer", "pointer", "pointer", "pointer"])
 }
 
-var new_pthread_create = create_pthread_create()
-GotHook("libhhh.so", "pthread_create", new_pthread_create)
+function create_loader_android_dlopen_ext(){
+    const linker = Process.findModuleByName("linker64")
+    let func_addr;
+    linker.enumerateSymbols().forEach(sym=>{
+        if (sym.name.indexOf("loader_android_dlopen_ext") !== -1){
+            func_addr = sym.address
+            console.log("找到loader_android_dlopen_ext " + sym.name)
+        }
+    })
+    console.log(func_addr)
+    const func = new NativeFunction(func_addr, "pointer", ["pointer", "int", "pointer", "pointer"])
+    return new NativeCallback((parg1, parg2, parg3, parg4)=>{
+        // 打印地址
+        console.log(parg1.readUtf8String())
+        // 对于加载好的so全部进行hook也可以
+        // 可以在这里进行操作
+        return func(parg1, parg2, parg3, parg4)
+    }, "pointer", ["pointer", "int", "pointer", "pointer"])
+}
+
+// android_dlopen_ext平替，android_dlopen_ext底层调用这个loader_android_dlopen_ext，它是linker的引入，这样子就可以实现平级的替换了
+const loader_android_dlopen_ext = create_loader_android_dlopen_ext()
+console.log("loader_android_dlopen_ext " + loader_android_dlopen_ext)
+GotHook("libdl.so", "loader_android_dlopen_ext", loader_android_dlopen_ext)
