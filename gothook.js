@@ -74,14 +74,28 @@ function parseElf64_Sym(sym_addr) {
 }
 
 function readStdString(str_addr) {
-    // 小字符串优化情况 - 通常在23字节内的字符串直接存储在对象中
     try {
-        // 长字符串情况 - 第一个8字节是指向实际字符串的指针
-        const str_ptr = str_addr.readPointer();
-        return str_ptr.readUtf8String();
-    } catch {
-        console.log(str_addr.sub(15).readUtf8String())
-        return str_addr.sub(15).readUtf8String();
+        const first_byte = str_addr.readU8();
+
+        if ((first_byte & 1) === 0) {
+            // 短字符串 (SSO)
+            const length = first_byte >> 1;
+            if (length === 0) return "";
+            if (length > 22) return "[SSO长度异常]"; // 安全检查
+
+            return str_addr.add(1).readUtf8String(length);
+        } else {
+            // 长字符串
+            const length = str_addr.add(8).readU64().toNumber();
+            if (length === 0) return "";
+            if (length > 10000) return "[长度过大]"; // 安全检查
+
+            const data_ptr = str_addr.add(16).readPointer();
+            return data_ptr.readUtf8String(length);
+        }
+    } catch (e) {
+        console.log("Error reading std::string at", str_addr, ":", e);
+        return "[读取失败]";
     }
 }
 
